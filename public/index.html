@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Caça Ofertas ML</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app">
+    <section class="hero">
+      <div>
+        <p class="tag">Mercado Livre</p>
+        <h1>Caça Ofertas ML</h1>
+        <p class="subtitle">Busque produtos, veja a nota da oferta e prepare os dados para o seu bot de mensagens.</p>
+      </div>
+    </section>
+
+    <section class="search-card">
+      <label for="termo">Produto</label>
+      <div class="search-row">
+        <input id="termo" type="text" placeholder="Ex: air fryer, fone bluetooth, creatina" />
+        <button id="btnBuscar">Caçar ofertas</button>
+      </div>
+      <p id="status" class="status">Digite um produto e clique em caçar ofertas.</p>
+    </section>
+
+    <section id="resultados" class="grid"></section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
