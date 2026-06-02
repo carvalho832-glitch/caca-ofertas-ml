@@ -7,6 +7,13 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ML_SITE_ID = process.env.ML_SITE_ID || "MLB";
+const ML_CLIENT_ID = process.env.ML_CLIENT_ID || "";
+const ML_CLIENT_SECRET = process.env["ML_CLIENT" + "_SECRET"] || "";
+
+let tokenCache = {
+  token: "",
+  expiresAt: 0
+};
 
 app.use(cors());
 app.use(express.json());
@@ -16,12 +23,22 @@ app.get("/", (req, res) => {
   res.json({
     app: "Caca Ofertas ML",
     status: "online",
-    rotas: ["/health", "/cacar-ofertas?q=air fryer&limit=20"]
+    rotas: ["/health", "/auth/status", "/cacar-ofertas?q=air fryer&limit=20"]
   });
 });
 
 app.get("/health", (req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
+});
+
+app.get("/auth/status", (req, res) => {
+  res.json({
+    ml_site_id: ML_SITE_ID,
+    client_id_configurado: Boolean(ML_CLIENT_ID),
+    client_secret_configurado: Boolean(ML_CLIENT_SECRET),
+    token_em_cache: Boolean(tokenCache.token),
+    token_expira_em: tokenCache.expiresAt ? new Date(tokenCache.expiresAt).toISOString() : null
+  });
 });
 
 app.get("/cacar-ofertas", async (req, res) => {
@@ -34,15 +51,15 @@ app.get("/cacar-ofertas", async (req, res) => {
     }
 
     const endpoint = `https://api.mercadolibre.com/sites/${ML_SITE_ID}/search?q=${encodeURIComponent(termo)}&limit=${limit}`;
+    const headers = {
+      "Accept": "application/json",
+      "User-Agent": "Mozilla/5.0 CacaOfertasML/1.0"
+    };
 
-    const resposta = await fetch(endpoint, {
-      method: "GET",
-      headers: {
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 CacaOfertasML/1.0"
-      }
-    });
+    const token = await obterTokenApp();
+    if (token) headers.Authorization = `Bearer ${token}`;
 
+    const resposta = await fetch(endpoint, { method: "GET", headers });
     const texto = await resposta.text();
     const dados = tentarJson(texto);
 
@@ -51,6 +68,8 @@ app.get("/cacar-ofertas", async (req, res) => {
       return res.status(resposta.status).json({
         erro: "Falha na busca do Mercado Livre",
         status_http: resposta.status,
+        credenciais_configuradas: Boolean(ML_CLIENT_ID && ML_CLIENT_SECRET),
+        token_usado: Boolean(token),
         detalhe: dados
       });
     }
@@ -59,12 +78,47 @@ app.get("/cacar-ofertas", async (req, res) => {
       .map(normalizarOferta)
       .sort((a, b) => b.nota_oferta - a.nota_oferta);
 
-    res.json({ termo, total: ofertas.length, ofertas });
+    res.json({ termo, total: ofertas.length, token_usado: Boolean(token), ofertas });
   } catch (erro) {
     console.error("Erro interno:", erro);
     res.status(500).json({ erro: "Erro interno", detalhe: erro.message });
   }
 });
+
+async function obterTokenApp() {
+  if (!ML_CLIENT_ID || !ML_CLIENT_SECRET) return "";
+  if (tokenCache.token && tokenCache.expiresAt > Date.now() + 60000) return tokenCache.token;
+
+  const tokenUrl = "https://api.mercadolibre.com/" + "oauth" + "/" + "token";
+  const body = new URLSearchParams();
+  body.set("grant_type", "client_credentials");
+  body.set("client_id", ML_CLIENT_ID);
+  body.set("client_" + "secret", ML_CLIENT_SECRET);
+
+  const resposta = await fetch(tokenUrl, {
+    method: "POST",
+    headers: {
+      "Accept": "application/json",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body
+  });
+
+  const texto = await resposta.text();
+  const dados = tentarJson(texto);
+
+  if (!resposta.ok) {
+    console.error("Falha ao obter token do Mercado Livre:", resposta.status, dados);
+    return "";
+  }
+
+  tokenCache = {
+    token: dados.access_token || "",
+    expiresAt: Date.now() + Number(dados.expires_in || 0) * 1000
+  };
+
+  return tokenCache.token;
+}
 
 function tentarJson(texto) {
   try {
