@@ -9,11 +9,10 @@ const PORT = process.env.PORT || 3000;
 const ML_SITE_ID = process.env.ML_SITE_ID || "MLB";
 const ML_CLIENT_ID = process.env.ML_CLIENT_ID || "";
 const ML_CLIENT_SECRET = process.env["ML_CLIENT" + "_SECRET"] || "";
+const ML_REDIRECT_URI = process.env.ML_REDIRECT_URI || "https://caca-ofertas-ml.onrender.com/auth/callback";
 
-let tokenCache = {
-  token: "",
-  expiresAt: 0
-};
+let appTokenCache = { token: "", expiresAt: 0 };
+let userTokenCache = { token: "", renew: "", expiresAt: 0, userId: null };
 
 app.use(cors());
 app.use(express.json());
@@ -23,7 +22,12 @@ app.get("/", (req, res) => {
   res.json({
     app: "Caca Ofertas ML",
     status: "online",
-    rotas: ["/health", "/auth/status", "/cacar-ofertas?q=air fryer&limit=20"]
+    rotas: [
+      "/health",
+      "/auth/status",
+      "/connect/ml",
+      "/cacar-ofertas?q=air fryer&limit=20"
+    ]
   });
 });
 
@@ -36,9 +40,52 @@ app.get("/auth/status", (req, res) => {
     ml_site_id: ML_SITE_ID,
     client_id_configurado: Boolean(ML_CLIENT_ID),
     client_secret_configurado: Boolean(ML_CLIENT_SECRET),
-    token_em_cache: Boolean(tokenCache.token),
-    token_expira_em: tokenCache.expiresAt ? new Date(tokenCache.expiresAt).toISOString() : null
+    redirect_uri: ML_REDIRECT_URI,
+    app_token_em_cache: Boolean(appTokenCache.token),
+    conta_ml_conectada: Boolean(userTokenCache.token),
+    user_id: userTokenCache.userId,
+    token_conta_expira_em: userTokenCache.expiresAt ? new Date(userTokenCache.expiresAt).toISOString() : null
   });
+});
+
+app.get("/connect/ml", (req, res) => {
+  if (!ML_CLIENT_ID || !ML_REDIRECT_URI) {
+    return res.status(500).send("Configure ML_CLIENT_ID e ML_REDIRECT_URI no Render.");
+  }
+
+  const url = new URL("https://auth.mercadolivre.com.br/authorization");
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", ML_CLIENT_ID);
+  url.searchParams.set("redirect_uri", ML_REDIRECT_URI);
+  res.redirect(url.toString());
+});
+
+app.get("/auth/callback", async (req, res) => {
+  try {
+    const code = String(req.query.code || "");
+    if (!code) return res.status(400).send("Codigo nao recebido.");
+
+    const dados = await trocarCodigoPorToken(code);
+    if (!dados.ok) {
+      return res.status(400).send("Falha ao conectar Mercado Livre: " + JSON.stringify(dados.detalhe));
+    }
+
+    salvarTokenConta(dados.detalhe);
+
+    res.send(`
+      <html>
+        <head><meta charset="UTF-8"><title>Mercado Livre conectado</title></head>
+        <body style="font-family:Arial;padding:24px;line-height:1.5;">
+          <h1>Mercado Livre conectado com sucesso!</h1>
+          <p>Agora volte ao painel e tente buscar uma oferta novamente.</p>
+          <p><a href="/">Voltar para o Caça Ofertas</a></p>
+        </body>
+      </html>
+    `);
+  } catch (erro) {
+    console.error("Erro no callback ML:", erro);
+    res.status(500).send("Erro interno: " + erro.message);
+  }
 });
 
 app.get("/cacar-ofertas", async (req, res) => {
@@ -56,7 +103,7 @@ app.get("/cacar-ofertas", async (req, res) => {
       "User-Agent": "Mozilla/5.0 CacaOfertasML/1.0"
     };
 
-    const token = await obterTokenApp();
+    const token = await obterMelhorToken();
     if (token) headers.Authorization = `Bearer ${token}`;
 
     const resposta = await fetch(endpoint, { method: "GET", headers });
@@ -69,6 +116,7 @@ app.get("/cacar-ofertas", async (req, res) => {
         erro: "Falha na busca do Mercado Livre",
         status_http: resposta.status,
         credenciais_configuradas: Boolean(ML_CLIENT_ID && ML_CLIENT_SECRET),
+        conta_ml_conectada: Boolean(userTokenCache.token),
         token_usado: Boolean(token),
         detalhe: dados
       });
@@ -78,23 +126,77 @@ app.get("/cacar-ofertas", async (req, res) => {
       .map(normalizarOferta)
       .sort((a, b) => b.nota_oferta - a.nota_oferta);
 
-    res.json({ termo, total: ofertas.length, token_usado: Boolean(token), ofertas });
+    res.json({
+      termo,
+      total: ofertas.length,
+      token_usado: Boolean(token),
+      conta_ml_conectada: Boolean(userTokenCache.token),
+      ofertas
+    });
   } catch (erro) {
     console.error("Erro interno:", erro);
     res.status(500).json({ erro: "Erro interno", detalhe: erro.message });
   }
 });
 
+async function obterMelhorToken() {
+  const tokenConta = await obterTokenConta();
+  if (tokenConta) return tokenConta;
+  return obterTokenApp();
+}
+
+async function obterTokenConta() {
+  if (!userTokenCache.token) return "";
+  if (userTokenCache.expiresAt > Date.now() + 60000) return userTokenCache.token;
+  if (!userTokenCache.renew) return "";
+
+  const dados = await renovarTokenConta();
+  if (!dados.ok) return "";
+  salvarTokenConta(dados.detalhe);
+  return userTokenCache.token;
+}
+
+async function trocarCodigoPorToken(code) {
+  const body = new URLSearchParams();
+  body.set("grant_type", "authorization_code");
+  body.set("client_id", ML_CLIENT_ID);
+  body.set("client_" + "secret", ML_CLIENT_SECRET);
+  body.set("code", code);
+  body.set("redirect_uri", ML_REDIRECT_URI);
+  return chamadaToken(body);
+}
+
+async function renovarTokenConta() {
+  const body = new URLSearchParams();
+  body.set("grant_type", "refresh_token");
+  body.set("client_id", ML_CLIENT_ID);
+  body.set("client_" + "secret", ML_CLIENT_SECRET);
+  body.set("refresh_token", userTokenCache.renew);
+  return chamadaToken(body);
+}
+
 async function obterTokenApp() {
   if (!ML_CLIENT_ID || !ML_CLIENT_SECRET) return "";
-  if (tokenCache.token && tokenCache.expiresAt > Date.now() + 60000) return tokenCache.token;
+  if (appTokenCache.token && appTokenCache.expiresAt > Date.now() + 60000) return appTokenCache.token;
 
-  const tokenUrl = "https://api.mercadolibre.com/" + "oauth" + "/" + "token";
   const body = new URLSearchParams();
   body.set("grant_type", "client_credentials");
   body.set("client_id", ML_CLIENT_ID);
   body.set("client_" + "secret", ML_CLIENT_SECRET);
 
+  const dados = await chamadaToken(body);
+  if (!dados.ok) return "";
+
+  appTokenCache = {
+    token: dados.detalhe.access_token || "",
+    expiresAt: Date.now() + Number(dados.detalhe.expires_in || 0) * 1000
+  };
+
+  return appTokenCache.token;
+}
+
+async function chamadaToken(body) {
+  const tokenUrl = "https://api.mercadolibre.com/" + "oauth" + "/" + "token";
   const resposta = await fetch(tokenUrl, {
     method: "POST",
     headers: {
@@ -105,19 +207,23 @@ async function obterTokenApp() {
   });
 
   const texto = await resposta.text();
-  const dados = tentarJson(texto);
+  const detalhe = tentarJson(texto);
 
   if (!resposta.ok) {
-    console.error("Falha ao obter token do Mercado Livre:", resposta.status, dados);
-    return "";
+    console.error("Falha token ML:", resposta.status, detalhe);
+    return { ok: false, detalhe };
   }
 
-  tokenCache = {
-    token: dados.access_token || "",
-    expiresAt: Date.now() + Number(dados.expires_in || 0) * 1000
-  };
+  return { ok: true, detalhe };
+}
 
-  return tokenCache.token;
+function salvarTokenConta(dados) {
+  userTokenCache = {
+    token: dados.access_token || "",
+    renew: dados.refresh_token || userTokenCache.renew || "",
+    expiresAt: Date.now() + Number(dados.expires_in || 0) * 1000,
+    userId: dados.user_id || userTokenCache.userId || null
+  };
 }
 
 function tentarJson(texto) {
