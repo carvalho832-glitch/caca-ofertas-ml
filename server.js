@@ -26,6 +26,7 @@ app.get("/", (req, res) => {
       "/health",
       "/auth/status",
       "/connect/ml",
+      "/teste/ml",
       "/cacar-ofertas?q=air fryer&limit=20"
     ]
   });
@@ -88,25 +89,45 @@ app.get("/auth/callback", async (req, res) => {
   }
 });
 
+app.get("/teste/ml", async (req, res) => {
+  try {
+    const token = await obterMelhorToken();
+    const testes = [
+      { nome: "sites", url: "https://api.mercadolibre.com/sites" },
+      { nome: "site_mlb", url: "https://api.mercadolibre.com/sites/MLB" },
+      { nome: "categorias_mlb", url: "https://api.mercadolibre.com/sites/MLB/categories" },
+      { nome: "minha_conta", url: "https://api.mercadolibre.com/users/me" },
+      { nome: "busca_publica", url: "https://api.mercadolibre.com/sites/MLB/search?q=air%20fryer&limit=2" }
+    ];
+
+    const resultados = [];
+    for (const teste of testes) {
+      const resposta = await fetch(teste.url, { headers: montarHeaders(token) });
+      const texto = await resposta.text();
+      resultados.push({
+        nome: teste.nome,
+        status: resposta.status,
+        ok: resposta.ok,
+        resumo: resumirResposta(tentarJson(texto))
+      });
+    }
+
+    res.json({ token_usado: Boolean(token), conta_ml_conectada: Boolean(userTokenCache.token), resultados });
+  } catch (erro) {
+    res.status(500).json({ erro: "Erro no teste ML", detalhe: erro.message });
+  }
+});
+
 app.get("/cacar-ofertas", async (req, res) => {
   try {
     const termo = String(req.query.q || "").trim();
     const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
 
-    if (!termo) {
-      return res.status(400).json({ erro: "Informe o produto em ?q=" });
-    }
+    if (!termo) return res.status(400).json({ erro: "Informe o produto em ?q=" });
 
     const endpoint = `https://api.mercadolibre.com/sites/${ML_SITE_ID}/search?q=${encodeURIComponent(termo)}&limit=${limit}`;
-    const headers = {
-      "Accept": "application/json",
-      "User-Agent": "Mozilla/5.0 CacaOfertasML/1.0"
-    };
-
     const token = await obterMelhorToken();
-    if (token) headers.Authorization = `Bearer ${token}`;
-
-    const resposta = await fetch(endpoint, { method: "GET", headers });
+    const resposta = await fetch(endpoint, { method: "GET", headers: montarHeaders(token) });
     const texto = await resposta.text();
     const dados = tentarJson(texto);
 
@@ -118,26 +139,39 @@ app.get("/cacar-ofertas", async (req, res) => {
         credenciais_configuradas: Boolean(ML_CLIENT_ID && ML_CLIENT_SECRET),
         conta_ml_conectada: Boolean(userTokenCache.token),
         token_usado: Boolean(token),
-        detalhe: dados
+        detalhe: dados,
+        proximo_teste: "/teste/ml"
       });
     }
 
-    const ofertas = (dados.results || [])
-      .map(normalizarOferta)
-      .sort((a, b) => b.nota_oferta - a.nota_oferta);
-
-    res.json({
-      termo,
-      total: ofertas.length,
-      token_usado: Boolean(token),
-      conta_ml_conectada: Boolean(userTokenCache.token),
-      ofertas
-    });
+    const ofertas = (dados.results || []).map(normalizarOferta).sort((a, b) => b.nota_oferta - a.nota_oferta);
+    res.json({ termo, total: ofertas.length, token_usado: Boolean(token), conta_ml_conectada: Boolean(userTokenCache.token), ofertas });
   } catch (erro) {
     console.error("Erro interno:", erro);
     res.status(500).json({ erro: "Erro interno", detalhe: erro.message });
   }
 });
+
+function montarHeaders(token) {
+  const headers = { "Accept": "application/json", "User-Agent": "Mozilla/5.0 CacaOfertasML/1.0" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+function resumirResposta(dados) {
+  if (Array.isArray(dados)) return { tipo: "array", total: dados.length, primeiro: dados[0] || null };
+  if (!dados || typeof dados !== "object") return dados;
+  return {
+    message: dados.message,
+    error: dados.error,
+    status: dados.status,
+    id: dados.id,
+    nickname: dados.nickname,
+    name: dados.name,
+    results_total: dados.paging?.total,
+    results: Array.isArray(dados.results) ? dados.results.slice(0, 2) : undefined
+  };
+}
 
 async function obterMelhorToken() {
   const tokenConta = await obterTokenConta();
@@ -149,7 +183,6 @@ async function obterTokenConta() {
   if (!userTokenCache.token) return "";
   if (userTokenCache.expiresAt > Date.now() + 60000) return userTokenCache.token;
   if (!userTokenCache.renew) return "";
-
   const dados = await renovarTokenConta();
   if (!dados.ok) return "";
   salvarTokenConta(dados.detalhe);
@@ -178,20 +211,13 @@ async function renovarTokenConta() {
 async function obterTokenApp() {
   if (!ML_CLIENT_ID || !ML_CLIENT_SECRET) return "";
   if (appTokenCache.token && appTokenCache.expiresAt > Date.now() + 60000) return appTokenCache.token;
-
   const body = new URLSearchParams();
   body.set("grant_type", "client_credentials");
   body.set("client_id", ML_CLIENT_ID);
   body.set("client_" + "secret", ML_CLIENT_SECRET);
-
   const dados = await chamadaToken(body);
   if (!dados.ok) return "";
-
-  appTokenCache = {
-    token: dados.detalhe.access_token || "",
-    expiresAt: Date.now() + Number(dados.detalhe.expires_in || 0) * 1000
-  };
-
+  appTokenCache = { token: dados.detalhe.access_token || "", expiresAt: Date.now() + Number(dados.detalhe.expires_in || 0) * 1000 };
   return appTokenCache.token;
 }
 
@@ -199,21 +225,15 @@ async function chamadaToken(body) {
   const tokenUrl = "https://api.mercadolibre.com/" + "oauth" + "/" + "token";
   const resposta = await fetch(tokenUrl, {
     method: "POST",
-    headers: {
-      "Accept": "application/json",
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
+    headers: { "Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded" },
     body
   });
-
   const texto = await resposta.text();
   const detalhe = tentarJson(texto);
-
   if (!resposta.ok) {
     console.error("Falha token ML:", resposta.status, detalhe);
     return { ok: false, detalhe };
   }
-
   return { ok: true, detalhe };
 }
 
@@ -227,11 +247,7 @@ function salvarTokenConta(dados) {
 }
 
 function tentarJson(texto) {
-  try {
-    return JSON.parse(texto);
-  } catch {
-    return { mensagem: texto };
-  }
+  try { return JSON.parse(texto); } catch { return { mensagem: texto }; }
 }
 
 function normalizarOferta(item) {
@@ -241,7 +257,6 @@ function normalizarOferta(item) {
   const freteGratis = Boolean(item.shipping?.free_shipping);
   const lojaOficial = Boolean(item.official_store_name);
   const nota = calcularNota({ precoAtual, precoAntigo, desconto, freteGratis, lojaOficial, condicao: item.condition });
-
   return {
     plataforma: "mercado_livre",
     id_externo: item.id || "",
@@ -262,22 +277,18 @@ function normalizarOferta(item) {
 
 function calcularNota({ precoAtual, precoAntigo, desconto, freteGratis, lojaOficial, condicao }) {
   let nota = 0;
-
   if (desconto >= 50) nota += 35;
   else if (desconto >= 35) nota += 30;
   else if (desconto >= 25) nota += 24;
   else if (desconto >= 15) nota += 18;
   else if (desconto >= 8) nota += 10;
-
   if (freteGratis) nota += 20;
   if (lojaOficial) nota += 15;
   if (condicao === "new") nota += 15;
-
   if (precoAtual && precoAtual <= 50) nota += 15;
   else if (precoAtual && precoAtual <= 150) nota += 12;
   else if (precoAtual && precoAtual <= 300) nota += 8;
   else if (precoAtual && precoAtual <= 600) nota += 5;
-
   if (!precoAntigo || desconto === 0) nota = Math.min(nota, 72);
   return Math.max(0, Math.min(100, Math.round(nota)));
 }
