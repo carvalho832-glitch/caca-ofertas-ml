@@ -12,20 +12,66 @@
       <div>
         <p class="tag">Mercado Livre</p>
         <h1>Caça Ofertas ML</h1>
-        <p class="subtitle">Busque produtos, veja a nota da oferta e prepare os dados para o seu bot de mensagens.</p>
+        <p class="subtitle">Modo semiautomático: cole os dados da oferta e gere nota, mensagem e JSON pronto para o seu bot.</p>
       </div>
     </section>
 
     <section class="search-card">
-      <label for="termo">Produto</label>
-      <div class="search-row">
-        <input id="termo" type="text" placeholder="Ex: air fryer, fone bluetooth, creatina" />
-        <button id="btnBuscar">Caçar ofertas</button>
+      <h2>Montar oferta manual</h2>
+      <p class="hint">Como a API bloqueou produtos, este modo usa os dados que você já vê na página/anúncio.</p>
+
+      <label for="titulo">Título do produto *</label>
+      <input id="titulo" type="text" placeholder="Ex: Samsung Galaxy A06 5G 128GB Preto" />
+
+      <div class="two-cols">
+        <div>
+          <label for="preco">Preço atual *</label>
+          <input id="preco" type="text" placeholder="Ex: 699,90" />
+        </div>
+        <div>
+          <label for="precoAntigo">Preço antigo</label>
+          <input id="precoAntigo" type="text" placeholder="Ex: 899,90" />
+        </div>
       </div>
-      <p id="status" class="status">Digite um produto e clique em caçar ofertas.</p>
+
+      <label for="link">Link do produto *</label>
+      <input id="link" type="text" placeholder="Cole aqui o link do Mercado Livre" />
+
+      <label for="imagem">Link da imagem</label>
+      <input id="imagem" type="text" placeholder="Opcional: URL da imagem do produto" />
+
+      <div class="two-cols">
+        <div>
+          <label for="cupom">Cupom</label>
+          <input id="cupom" type="text" placeholder="Ex: MERCADO20" />
+        </div>
+        <div>
+          <label for="linkAfiliado">Link afiliado</label>
+          <input id="linkAfiliado" type="text" placeholder="Opcional: seu link afiliado" />
+        </div>
+      </div>
+
+      <label class="check-row">
+        <input id="freteGratis" type="checkbox" />
+        <span>Frete grátis</span>
+      </label>
+
+      <button id="btnManual">Gerar oferta</button>
+      <p id="status" class="status">Preencha os campos e gere a oferta.</p>
     </section>
 
     <section id="resultados" class="grid"></section>
+
+    <section class="search-card compact">
+      <h2>Teste de link ML</h2>
+      <p class="hint">Esse modo ainda tenta a API do Mercado Livre. Se der 403, use o modo manual acima.</p>
+      <label for="linkTeste">Link do Mercado Livre</label>
+      <div class="search-row">
+        <input id="linkTeste" type="text" placeholder="Cole um link do ML para testar" />
+        <button id="btnLink">Testar link</button>
+      </div>
+      <pre id="debug"></pre>
+    </section>
   </main>
 
   <script src="script.js"></script>
