@@ -74,7 +74,6 @@ app.get("/auth/callback", async (req, res) => {
     }
 
     salvarTokenConta(dados.detalhe);
-
     res.send(`
       <html>
         <head><meta charset="UTF-8"><title>Mercado Livre conectado</title></head>
@@ -149,17 +148,11 @@ app.post("/analisar-links", async (req, res) => {
     for (const link of links) {
       const resultado = await analisarLinkProduto(link);
       if (resultado.ok) analisadas.push(resultado.oferta);
-      else erros.push({ link, erro: resultado.erro, detalhe: resultado.detalhe });
+      else erros.push({ link, erro: resultado.erro, detalhe: resultado.detalhe, link_final: resultado.link_final });
     }
 
     analisadas.sort((a, b) => b.nota_oferta - a.nota_oferta);
-
-    res.json({
-      total_recebido: links.length,
-      total_analisado: analisadas.length,
-      ofertas: analisadas,
-      erros
-    });
+    res.json({ total_recebido: links.length, total_analisado: analisadas.length, ofertas: analisadas, erros });
   } catch (erro) {
     res.status(500).json({ erro: "Erro ao analisar links", detalhe: erro.message });
   }
@@ -203,15 +196,15 @@ app.get("/cacar-ofertas", async (req, res) => {
 });
 
 async function analisarLinkProduto(link) {
-  const id = extrairIdProdutoML(link);
+  const linkFinal = await resolverLinkFinal(link);
+  const id = extrairIdProdutoML(`${link} ${linkFinal}`);
+
   if (!id) {
-    return { ok: false, erro: "Nao consegui identificar o ID do produto no link.", link };
+    return { ok: false, erro: "Nao consegui identificar o ID do anuncio no link.", link, link_final: linkFinal || "" };
   }
 
   const token = await obterMelhorToken();
-  const resposta = await fetch(`https://api.mercadolibre.com/items/${id}`, {
-    headers: montarHeaders(token)
-  });
+  const resposta = await fetch(`https://api.mercadolibre.com/items/${id}`, { headers: montarHeaders(token) });
   const texto = await resposta.text();
   const dados = tentarJson(texto);
 
@@ -222,21 +215,60 @@ async function analisarLinkProduto(link) {
       status_http: resposta.status,
       id,
       link,
+      link_final: linkFinal || "",
       detalhe: dados
     };
   }
 
   const oferta = normalizarOferta(dados);
   oferta.link_original = link;
+  oferta.link_final = linkFinal || link;
+  return { ok: true, id, link_final: linkFinal || link, oferta };
+}
 
-  return { ok: true, id, oferta };
+async function resolverLinkFinal(link) {
+  try {
+    const entrada = String(link || "").trim();
+    if (!entrada.startsWith("http")) return entrada;
+
+    const resposta = await fetch(entrada, {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 CacaOfertasML/1.0"
+      }
+    });
+
+    return resposta.url || entrada;
+  } catch (erro) {
+    console.error("Falha ao resolver link final:", erro.message);
+    return link;
+  }
 }
 
 function extrairIdProdutoML(texto) {
   const entrada = String(texto || "");
-  const matchComHifen = entrada.match(/MLB-?\d{6,}/i);
-  if (matchComHifen) return matchComHifen[0].toUpperCase().replace("-", "");
+  const decodificado = safeDecode(entrada);
+  const base = `${entrada} ${decodificado}`;
+
+  const wid = base.match(/[?&#]wid=(MLB\d{6,})/i);
+  if (wid) return wid[1].toUpperCase();
+
+  const itemId = base.match(/[?&#](?:item_id|itemId|item)=?(MLB\d{6,})/i);
+  if (itemId) return itemId[1].toUpperCase();
+
+  const anuncioPath = base.match(/(?:produto\.mercadolivre\.com\.br|articulo\.mercadolibre\.com)[^\s]*\/(MLB-?\d{6,})-/i);
+  if (anuncioPath) return anuncioPath[1].toUpperCase().replace("-", "");
+
+  const generico = base.match(/MLB-?\d{9,}/i);
+  if (generico) return generico[0].toUpperCase().replace("-", "");
+
   return "";
+}
+
+function safeDecode(valor) {
+  try { return decodeURIComponent(valor); } catch { return valor; }
 }
 
 function normalizarListaLinks(entrada) {
@@ -245,7 +277,7 @@ function normalizarListaLinks(entrada) {
   return String(entrada || "")
     .split(/\s+/)
     .map((x) => x.trim())
-    .filter((x) => x.includes("mercadolivre") || x.includes("mercadolibre") || /MLB-?\d{6,}/i.test(x));
+    .filter((x) => x.includes("meli.la") || x.includes("mercadolivre") || x.includes("mercadolibre") || /MLB-?\d{6,}/i.test(x));
 }
 
 function montarHeaders(token) {
