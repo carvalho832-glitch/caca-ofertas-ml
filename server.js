@@ -34,11 +34,25 @@ app.get("/cacar-ofertas", async (req, res) => {
     }
 
     const endpoint = `https://api.mercadolibre.com/sites/${ML_SITE_ID}/search?q=${encodeURIComponent(termo)}&limit=${limit}`;
-    const resposta = await fetch(endpoint);
-    const dados = await resposta.json();
+
+    const resposta = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 CacaOfertasML/1.0"
+      }
+    });
+
+    const texto = await resposta.text();
+    const dados = tentarJson(texto);
 
     if (!resposta.ok) {
-      return res.status(resposta.status).json({ erro: "Falha na busca", detalhe: dados });
+      console.error("Falha Mercado Livre:", resposta.status, dados);
+      return res.status(resposta.status).json({
+        erro: "Falha na busca do Mercado Livre",
+        status_http: resposta.status,
+        detalhe: dados
+      });
     }
 
     const ofertas = (dados.results || [])
@@ -47,9 +61,18 @@ app.get("/cacar-ofertas", async (req, res) => {
 
     res.json({ termo, total: ofertas.length, ofertas });
   } catch (erro) {
+    console.error("Erro interno:", erro);
     res.status(500).json({ erro: "Erro interno", detalhe: erro.message });
   }
 });
+
+function tentarJson(texto) {
+  try {
+    return JSON.parse(texto);
+  } catch {
+    return { mensagem: texto };
+  }
+}
 
 function normalizarOferta(item) {
   const precoAtual = numero(item.price);
