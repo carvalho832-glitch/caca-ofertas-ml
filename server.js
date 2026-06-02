@@ -15,7 +15,7 @@ let appTokenCache = { token: "", expiresAt: 0 };
 let userTokenCache = { token: "", renew: "", expiresAt: 0, userId: null };
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 app.use(express.static("public"));
 
 app.get("/", (req, res) => {
@@ -27,6 +27,8 @@ app.get("/", (req, res) => {
       "/auth/status",
       "/connect/ml",
       "/teste/ml",
+      "/analisar-link?url=LINK_DO_ML",
+      "POST /analisar-links",
       "/cacar-ofertas?q=air fryer&limit=20"
     ]
   });
@@ -118,6 +120,51 @@ app.get("/teste/ml", async (req, res) => {
   }
 });
 
+app.get("/analisar-link", async (req, res) => {
+  try {
+    const urlProduto = String(req.query.url || "").trim();
+    if (!urlProduto) return res.status(400).json({ erro: "Informe ?url= com o link do Mercado Livre." });
+
+    const resultado = await analisarLinkProduto(urlProduto);
+    if (!resultado.ok) return res.status(400).json(resultado);
+
+    res.json(resultado);
+  } catch (erro) {
+    res.status(500).json({ erro: "Erro ao analisar link", detalhe: erro.message });
+  }
+});
+
+app.post("/analisar-links", async (req, res) => {
+  try {
+    const entrada = req.body?.links || req.body?.texto || "";
+    const links = normalizarListaLinks(entrada).slice(0, 30);
+
+    if (!links.length) {
+      return res.status(400).json({ erro: "Envie links do Mercado Livre em links[] ou texto." });
+    }
+
+    const analisadas = [];
+    const erros = [];
+
+    for (const link of links) {
+      const resultado = await analisarLinkProduto(link);
+      if (resultado.ok) analisadas.push(resultado.oferta);
+      else erros.push({ link, erro: resultado.erro, detalhe: resultado.detalhe });
+    }
+
+    analisadas.sort((a, b) => b.nota_oferta - a.nota_oferta);
+
+    res.json({
+      total_recebido: links.length,
+      total_analisado: analisadas.length,
+      ofertas: analisadas,
+      erros
+    });
+  } catch (erro) {
+    res.status(500).json({ erro: "Erro ao analisar links", detalhe: erro.message });
+  }
+});
+
 app.get("/cacar-ofertas", async (req, res) => {
   try {
     const termo = String(req.query.q || "").trim();
@@ -134,13 +181,16 @@ app.get("/cacar-ofertas", async (req, res) => {
     if (!resposta.ok) {
       console.error("Falha Mercado Livre:", resposta.status, dados);
       return res.status(resposta.status).json({
-        erro: "Falha na busca do Mercado Livre",
+        erro: "Busca por palavra-chave bloqueada pelo Mercado Livre neste app. Use /analisar-link ou /analisar-links.",
         status_http: resposta.status,
         credenciais_configuradas: Boolean(ML_CLIENT_ID && ML_CLIENT_SECRET),
         conta_ml_conectada: Boolean(userTokenCache.token),
         token_usado: Boolean(token),
         detalhe: dados,
-        proximo_teste: "/teste/ml"
+        alternativa: {
+          analisar_um_link: "/analisar-link?url=LINK_DO_ML",
+          analisar_varios_links: "POST /analisar-links"
+        }
       });
     }
 
@@ -151,6 +201,52 @@ app.get("/cacar-ofertas", async (req, res) => {
     res.status(500).json({ erro: "Erro interno", detalhe: erro.message });
   }
 });
+
+async function analisarLinkProduto(link) {
+  const id = extrairIdProdutoML(link);
+  if (!id) {
+    return { ok: false, erro: "Nao consegui identificar o ID do produto no link.", link };
+  }
+
+  const token = await obterMelhorToken();
+  const resposta = await fetch(`https://api.mercadolibre.com/items/${id}`, {
+    headers: montarHeaders(token)
+  });
+  const texto = await resposta.text();
+  const dados = tentarJson(texto);
+
+  if (!resposta.ok) {
+    return {
+      ok: false,
+      erro: "Falha ao consultar item no Mercado Livre",
+      status_http: resposta.status,
+      id,
+      link,
+      detalhe: dados
+    };
+  }
+
+  const oferta = normalizarOferta(dados);
+  oferta.link_original = link;
+
+  return { ok: true, id, oferta };
+}
+
+function extrairIdProdutoML(texto) {
+  const entrada = String(texto || "");
+  const matchComHifen = entrada.match(/MLB-?\d{6,}/i);
+  if (matchComHifen) return matchComHifen[0].toUpperCase().replace("-", "");
+  return "";
+}
+
+function normalizarListaLinks(entrada) {
+  if (Array.isArray(entrada)) return entrada.map(String).map((x) => x.trim()).filter(Boolean);
+
+  return String(entrada || "")
+    .split(/\s+/)
+    .map((x) => x.trim())
+    .filter((x) => x.includes("mercadolivre") || x.includes("mercadolibre") || /MLB-?\d{6,}/i.test(x));
+}
 
 function montarHeaders(token) {
   const headers = { "Accept": "application/json", "User-Agent": "Mozilla/5.0 CacaOfertasML/1.0" };
@@ -256,7 +352,9 @@ function normalizarOferta(item) {
   const desconto = calcularDesconto(precoAntigo, precoAtual);
   const freteGratis = Boolean(item.shipping?.free_shipping);
   const lojaOficial = Boolean(item.official_store_name);
-  const nota = calcularNota({ precoAtual, precoAntigo, desconto, freteGratis, lojaOficial, condicao: item.condition });
+  const imagem = item.thumbnail || item.secure_thumbnail || item.pictures?.[0]?.secure_url || item.pictures?.[0]?.url || "";
+  const nota = calcularNota({ precoAtual, precoAntigo, desconto, freteGratis, lojaOficial, condicao: item.condition, status: item.status });
+
   return {
     plataforma: "mercado_livre",
     id_externo: item.id || "",
@@ -264,18 +362,21 @@ function normalizarOferta(item) {
     preco_atual: precoAtual,
     preco_antigo: precoAntigo,
     desconto_percentual: desconto,
-    imagem: trocarHttps(item.thumbnail || ""),
+    imagem: trocarHttps(imagem),
     link_produto: item.permalink || "",
     link_afiliado: "",
     frete_gratis: freteGratis,
     loja_oficial: item.official_store_name || "",
     condicao: item.condition === "new" ? "novo" : item.condition || "nao informado",
+    estoque_disponivel: numero(item.available_quantity),
+    vendidos: numero(item.sold_quantity),
+    status_ml: item.status || "",
     nota_oferta: nota,
     status: nota >= 75 ? "boa_oferta" : nota >= 50 ? "revisar" : "descartar"
   };
 }
 
-function calcularNota({ precoAtual, precoAntigo, desconto, freteGratis, lojaOficial, condicao }) {
+function calcularNota({ precoAtual, precoAntigo, desconto, freteGratis, lojaOficial, condicao, status }) {
   let nota = 0;
   if (desconto >= 50) nota += 35;
   else if (desconto >= 35) nota += 30;
@@ -285,6 +386,7 @@ function calcularNota({ precoAtual, precoAntigo, desconto, freteGratis, lojaOfic
   if (freteGratis) nota += 20;
   if (lojaOficial) nota += 15;
   if (condicao === "new") nota += 15;
+  if (status === "active") nota += 10;
   if (precoAtual && precoAtual <= 50) nota += 15;
   else if (precoAtual && precoAtual <= 150) nota += 12;
   else if (precoAtual && precoAtual <= 300) nota += 8;
