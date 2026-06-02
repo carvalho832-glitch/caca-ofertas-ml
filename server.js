@@ -18,23 +18,6 @@ app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use(express.static("public"));
 
-app.get("/", (req, res) => {
-  res.json({
-    app: "Caca Ofertas ML",
-    status: "online",
-    rotas: [
-      "/health",
-      "/auth/status",
-      "/connect/ml",
-      "/teste/ml",
-      "/teste/item?id=MLB4475360653",
-      "/analisar-link?url=LINK_DO_ML",
-      "POST /analisar-links",
-      "/cacar-ofertas?q=air fryer&limit=20"
-    ]
-  });
-});
-
 app.get("/health", (req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
@@ -80,14 +63,91 @@ app.get("/auth/callback", async (req, res) => {
         <head><meta charset="UTF-8"><title>Mercado Livre conectado</title></head>
         <body style="font-family:Arial;padding:24px;line-height:1.5;">
           <h1>Mercado Livre conectado com sucesso!</h1>
-          <p>Agora volte ao painel e tente buscar uma oferta novamente.</p>
+          <p>Agora volte ao painel e teste novamente.</p>
           <p><a href="/">Voltar para o Caça Ofertas</a></p>
         </body>
       </html>
     `);
   } catch (erro) {
-    console.error("Erro no callback ML:", erro);
     res.status(500).send("Erro interno: " + erro.message);
+  }
+});
+
+app.get("/", (req, res) => {
+  res.json({
+    app: "Caca Ofertas ML",
+    status: "online",
+    modo_recomendado: "oferta-manual",
+    rotas: [
+      "GET /health",
+      "GET /auth/status",
+      "GET /connect/ml",
+      "GET /teste/ml",
+      "GET /teste/item?id=MLB4475360653",
+      "GET /analisar-link?url=LINK_DO_ML",
+      "POST /analisar-links",
+      "GET /oferta-manual?titulo=...&preco=...&link=...",
+      "POST /oferta-manual"
+    ]
+  });
+});
+
+app.get("/oferta-manual", (req, res) => {
+  const resultado = montarOfertaManual(req.query || {});
+  res.status(resultado.ok ? 200 : 400).json(resultado);
+});
+
+app.post("/oferta-manual", (req, res) => {
+  const resultado = montarOfertaManual(req.body || {});
+  res.status(resultado.ok ? 200 : 400).json(resultado);
+});
+
+app.post("/analisar-links", async (req, res) => {
+  try {
+    const entrada = req.body?.links || req.body?.texto || "";
+    const links = normalizarListaLinks(entrada).slice(0, 30);
+
+    if (!links.length) {
+      return res.status(400).json({ erro: "Envie links do Mercado Livre em links[] ou texto." });
+    }
+
+    const analisadas = [];
+    const erros = [];
+
+    for (const link of links) {
+      const resultado = await analisarLinkProduto(link);
+      if (resultado.ok) analisadas.push(resultado.oferta);
+      else erros.push(resultado);
+    }
+
+    analisadas.sort((a, b) => b.nota_oferta - a.nota_oferta);
+    res.json({ total_recebido: links.length, total_analisado: analisadas.length, ofertas: analisadas, erros });
+  } catch (erro) {
+    res.status(500).json({ erro: "Erro ao analisar links", detalhe: erro.message });
+  }
+});
+
+app.get("/analisar-link", async (req, res) => {
+  try {
+    const urlProduto = String(req.query.url || "").trim();
+    if (!urlProduto) return res.status(400).json({ erro: "Informe ?url= com o link do Mercado Livre." });
+
+    const resultado = await analisarLinkProduto(urlProduto);
+    res.status(resultado.ok ? 200 : 400).json(resultado);
+  } catch (erro) {
+    res.status(500).json({ erro: "Erro ao analisar link", detalhe: erro.message });
+  }
+});
+
+app.get("/teste/item", async (req, res) => {
+  try {
+    const id = String(req.query.id || "").trim().toUpperCase().replace("-", "");
+    if (!/^MLB\d{6,}$/.test(id)) return res.status(400).json({ erro: "Informe ?id=MLB123" });
+
+    const resultado = await consultarItemComFallbacks(id);
+    res.status(resultado.ok ? 200 : 400).json(resultado);
+  } catch (erro) {
+    res.status(500).json({ erro: "Erro no teste do item", detalhe: erro.message });
   }
 });
 
@@ -113,55 +173,6 @@ app.get("/teste/ml", async (req, res) => {
   }
 });
 
-app.get("/teste/item", async (req, res) => {
-  try {
-    const id = String(req.query.id || "").trim().toUpperCase().replace("-", "");
-    if (!/^MLB\d{6,}$/.test(id)) return res.status(400).json({ erro: "Informe ?id=MLB123" });
-
-    const resultado = await consultarItemComFallbacks(id);
-    res.status(resultado.ok ? 200 : 400).json(resultado);
-  } catch (erro) {
-    res.status(500).json({ erro: "Erro no teste do item", detalhe: erro.message });
-  }
-});
-
-app.get("/analisar-link", async (req, res) => {
-  try {
-    const urlProduto = String(req.query.url || "").trim();
-    if (!urlProduto) return res.status(400).json({ erro: "Informe ?url= com o link do Mercado Livre." });
-
-    const resultado = await analisarLinkProduto(urlProduto);
-    res.status(resultado.ok ? 200 : 400).json(resultado);
-  } catch (erro) {
-    res.status(500).json({ erro: "Erro ao analisar link", detalhe: erro.message });
-  }
-});
-
-app.post("/analisar-links", async (req, res) => {
-  try {
-    const entrada = req.body?.links || req.body?.texto || "";
-    const links = normalizarListaLinks(entrada).slice(0, 30);
-
-    if (!links.length) {
-      return res.status(400).json({ erro: "Envie links do Mercado Livre em links[] ou texto." });
-    }
-
-    const analisadas = [];
-    const erros = [];
-
-    for (const link of links) {
-      const resultado = await analisarLinkProduto(link);
-      if (resultado.ok) analisadas.push(resultado.oferta);
-      else erros.push({ link, erro: resultado.erro, detalhe: resultado.detalhe, tentativas: resultado.tentativas, ids: resultado.ids });
-    }
-
-    analisadas.sort((a, b) => b.nota_oferta - a.nota_oferta);
-    res.json({ total_recebido: links.length, total_analisado: analisadas.length, ofertas: analisadas, erros });
-  } catch (erro) {
-    res.status(500).json({ erro: "Erro ao analisar links", detalhe: erro.message });
-  }
-});
-
 app.get("/cacar-ofertas", async (req, res) => {
   try {
     const termo = String(req.query.q || "").trim();
@@ -177,11 +188,10 @@ app.get("/cacar-ofertas", async (req, res) => {
 
     if (!resposta.ok) {
       return res.status(resposta.status).json({
-        erro: "Busca por palavra-chave bloqueada pelo Mercado Livre neste app. Use /analisar-link ou /analisar-links.",
+        erro: "Busca por palavra-chave bloqueada pelo Mercado Livre neste app. Use o modo manual.",
         status_http: resposta.status,
-        token_usado: Boolean(token),
         detalhe: dados,
-        alternativa: { analisar_um_link: "/analisar-link?url=LINK_DO_ML", analisar_varios_links: "POST /analisar-links" }
+        alternativa: { modo_manual: "POST /oferta-manual" }
       });
     }
 
@@ -197,7 +207,14 @@ async function analisarLinkProduto(link) {
   const ids = extrairIdsMercadoLivre(`${link} ${linkFinal}`);
 
   if (!ids.itemId && !ids.productId) {
-    return { ok: false, erro: "Nao consegui identificar ID de anuncio ou catalogo no link.", link, link_final: linkFinal || "", ids };
+    return {
+      ok: false,
+      erro: "Nao consegui identificar ID de anuncio ou catalogo no link.",
+      link,
+      link_final: linkFinal || "",
+      ids,
+      proximo_caminho: "Use POST /oferta-manual com titulo, preco, link e imagem."
+    };
   }
 
   const tentativas = [];
@@ -210,32 +227,19 @@ async function analisarLinkProduto(link) {
       oferta.link_original = link;
       oferta.link_final = linkFinal || link;
       oferta.origem_dados = item.origem;
-      return { ok: true, id: ids.itemId, ids, oferta, tentativas };
+      return { ok: true, id: ids.itemId, ids, oferta, mensagem: gerarMensagemOferta(oferta), tentativas };
     }
   }
 
   if (ids.productId) {
     const produto = await consultarProdutoCatalogo(ids.productId);
     tentativas.push(...produto.tentativas);
-
-    if (produto.ok && produto.item_id) {
-      const item = await consultarItemComFallbacks(produto.item_id);
-      tentativas.push(...item.tentativas);
-      if (item.ok) {
-        const oferta = normalizarOfertaItem(item.dados);
-        oferta.link_original = link;
-        oferta.link_final = linkFinal || link;
-        oferta.origem_dados = `${produto.origem} + ${item.origem}`;
-        return { ok: true, id: produto.item_id, ids, oferta, tentativas };
-      }
-    }
-
     if (produto.ok) {
       const oferta = normalizarOfertaCatalogo(produto.dados, linkFinal || link);
       oferta.link_original = link;
       oferta.link_final = linkFinal || link;
       oferta.origem_dados = produto.origem;
-      return { ok: true, id: ids.productId, ids, oferta, tentativas };
+      return { ok: true, id: ids.productId, ids, oferta, mensagem: gerarMensagemOferta(oferta), tentativas };
     }
   }
 
@@ -246,8 +250,96 @@ async function analisarLinkProduto(link) {
     link_final: linkFinal || "",
     ids,
     tentativas,
-    proximo_caminho: "Enviar titulo, preco, imagem e link para o endpoint manual, ou usar fonte autorizada do afiliado."
+    proximo_caminho: "Use POST /oferta-manual com titulo, preco, link e imagem."
   };
+}
+
+function montarOfertaManual(dadosEntrada) {
+  const titulo = String(dadosEntrada.titulo || dadosEntrada.title || "").trim();
+  const link = String(dadosEntrada.link || dadosEntrada.url || dadosEntrada.link_produto || "").trim();
+  const imagem = String(dadosEntrada.imagem || dadosEntrada.image || dadosEntrada.thumbnail || "").trim();
+  const precoAtual = parseNumeroBR(dadosEntrada.preco ?? dadosEntrada.preco_atual ?? dadosEntrada.price);
+  const precoAntigo = parseNumeroBR(dadosEntrada.preco_antigo ?? dadosEntrada.preco_de ?? dadosEntrada.original_price);
+  const freteGratis = parseBoolean(dadosEntrada.frete_gratis ?? dadosEntrada.free_shipping);
+  const lojaOficial = String(dadosEntrada.loja_oficial || "").trim();
+  const cupom = String(dadosEntrada.cupom || "").trim();
+  const origem = String(dadosEntrada.origem || "manual").trim();
+
+  const faltando = [];
+  if (!titulo) faltando.push("titulo");
+  if (!Number.isFinite(precoAtual)) faltando.push("preco");
+  if (!link) faltando.push("link");
+
+  if (faltando.length) {
+    return { ok: false, erro: "Campos obrigatorios ausentes", faltando };
+  }
+
+  const desconto = calcularDesconto(precoAntigo, precoAtual);
+  const nota = calcularNota({
+    precoAtual,
+    precoAntigo,
+    desconto,
+    freteGratis,
+    lojaOficial,
+    condicao: "novo",
+    status: "active"
+  });
+
+  const oferta = {
+    plataforma: "mercado_livre",
+    origem_dados: origem,
+    id_externo: String(dadosEntrada.id || dadosEntrada.id_externo || "manual_" + Date.now()),
+    titulo,
+    preco_atual: precoAtual,
+    preco_antigo: Number.isFinite(precoAntigo) ? precoAntigo : null,
+    desconto_percentual: desconto,
+    imagem: trocarHttps(imagem),
+    link_produto: link,
+    link_afiliado: String(dadosEntrada.link_afiliado || ""),
+    cupom,
+    frete_gratis: freteGratis,
+    loja_oficial: lojaOficial,
+    condicao: "novo",
+    estoque_disponivel: null,
+    vendidos: null,
+    status_ml: "manual",
+    nota_oferta: nota,
+    status: nota >= 75 ? "boa_oferta" : nota >= 50 ? "revisar" : "descartar",
+    criado_em: new Date().toISOString()
+  };
+
+  const mensagem = gerarMensagemOferta(oferta);
+
+  return {
+    ok: true,
+    modo: "manual_semiautomatico",
+    oferta,
+    mensagem,
+    payload_bot: {
+      tipo: "oferta",
+      plataforma: "mercado_livre",
+      origem: "caca_ofertas_ml",
+      oferta,
+      mensagem
+    }
+  };
+}
+
+function gerarMensagemOferta(oferta) {
+  const linhas = [];
+  linhas.push(`🔥 ${oferta.titulo}`);
+  if (oferta.preco_antigo && oferta.preco_antigo > oferta.preco_atual) {
+    linhas.push(`De ${formatarMoeda(oferta.preco_antigo)} por ${formatarMoeda(oferta.preco_atual)}`);
+  } else {
+    linhas.push(`Por ${formatarMoeda(oferta.preco_atual)}`);
+  }
+  if (oferta.desconto_percentual) linhas.push(`💸 Desconto de ${oferta.desconto_percentual}%`);
+  if (oferta.cupom) linhas.push(`🎟️ Cupom: ${oferta.cupom}`);
+  if (oferta.frete_gratis) linhas.push("🚚 Frete grátis");
+  linhas.push(`⭐ Nota da oferta: ${oferta.nota_oferta}/100`);
+  linhas.push("🔒 Compre com segurança no site oficial:");
+  linhas.push(`🛒 Link Mercado Livre: ${oferta.link_afiliado || oferta.link_produto}`);
+  return linhas.join("\n");
 }
 
 async function consultarItemComFallbacks(id) {
@@ -290,28 +382,10 @@ async function consultarProdutoCatalogo(productId) {
     const texto = await r.text();
     const dados = tentarJson(texto);
     tentativas.push({ origem: tentativa.origem, status: r.status, ok: r.ok, resumo: resumirResposta(dados) });
-    if (r.ok) {
-      const itemId = extrairItemDoProdutoCatalogo(dados);
-      return { ok: true, origem: tentativa.origem, dados, item_id: itemId, tentativas };
-    }
+    if (r.ok) return { ok: true, origem: tentativa.origem, dados, tentativas };
   }
 
   return { ok: false, tentativas };
-}
-
-function extrairItemDoProdutoCatalogo(dados) {
-  const candidatos = [
-    dados?.buy_box_winner?.item_id,
-    dados?.buy_box_winner?.id,
-    dados?.winner_item_id,
-    dados?.settings?.buy_box_winner?.item_id
-  ].filter(Boolean);
-
-  for (const c of candidatos) {
-    const id = String(c).toUpperCase().replace("-", "");
-    if (/^MLB\d{6,}$/.test(id)) return id;
-  }
-  return "";
 }
 
 async function testarEndpoint(nome, url, headers) {
@@ -331,8 +405,7 @@ async function resolverLinkFinal(link) {
       headers: { "Accept": "text/html,*/*;q=0.8", "User-Agent": "Mozilla/5.0 CacaOfertasML/1.0" }
     });
     return resposta.url || entrada;
-  } catch (erro) {
-    console.error("Falha ao resolver link final:", erro.message);
+  } catch {
     return link;
   }
 }
@@ -385,7 +458,6 @@ function resumirResposta(dados) {
     name: dados.name,
     title: dados.title,
     price: dados.price,
-    item_id: dados.item_id,
     results_total: dados.paging?.total,
     results: Array.isArray(dados.results) ? dados.results.slice(0, 2) : undefined
   };
@@ -537,13 +609,33 @@ function calcularNota({ precoAtual, precoAntigo, desconto, freteGratis, lojaOfic
 }
 
 function calcularDesconto(precoAntigo, precoAtual) {
-  if (!precoAntigo || !precoAtual || precoAntigo <= precoAtual) return 0;
+  if (!Number.isFinite(precoAntigo) || !Number.isFinite(precoAtual) || precoAntigo <= precoAtual) return 0;
   return Math.round(((precoAntigo - precoAtual) / precoAntigo) * 100);
+}
+
+function parseNumeroBR(valor) {
+  if (typeof valor === "number") return Number.isFinite(valor) ? valor : null;
+  const texto = String(valor ?? "").trim();
+  if (!texto) return null;
+  const limpo = texto.replace(/R\$/gi, "").replace(/\s/g, "").replace(/\./g, "").replace(",", ".");
+  const n = Number(limpo);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseBoolean(valor) {
+  if (typeof valor === "boolean") return valor;
+  const texto = String(valor ?? "").toLowerCase().trim();
+  return ["true", "1", "sim", "s", "yes", "frete gratis", "frete_gratis"].includes(texto);
 }
 
 function numero(valor) {
   const n = Number(valor);
   return Number.isFinite(n) ? n : null;
+}
+
+function formatarMoeda(valor) {
+  if (!Number.isFinite(Number(valor))) return "Preço indisponível";
+  return Number(valor).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
 function trocarHttps(url) {
