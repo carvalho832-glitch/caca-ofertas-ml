@@ -27,6 +27,7 @@ app.get("/", (req, res) => {
       "/auth/status",
       "/connect/ml",
       "/teste/ml",
+      "/teste/item?id=MLB4475360653",
       "/analisar-link?url=LINK_DO_ML",
       "POST /analisar-links",
       "/cacar-ofertas?q=air fryer&limit=20"
@@ -103,19 +104,24 @@ app.get("/teste/ml", async (req, res) => {
 
     const resultados = [];
     for (const teste of testes) {
-      const resposta = await fetch(teste.url, { headers: montarHeaders(token) });
-      const texto = await resposta.text();
-      resultados.push({
-        nome: teste.nome,
-        status: resposta.status,
-        ok: resposta.ok,
-        resumo: resumirResposta(tentarJson(texto))
-      });
+      resultados.push(await testarEndpoint(teste.nome, teste.url, montarHeaders(token)));
     }
 
     res.json({ token_usado: Boolean(token), conta_ml_conectada: Boolean(userTokenCache.token), resultados });
   } catch (erro) {
     res.status(500).json({ erro: "Erro no teste ML", detalhe: erro.message });
+  }
+});
+
+app.get("/teste/item", async (req, res) => {
+  try {
+    const id = String(req.query.id || "").trim().toUpperCase().replace("-", "");
+    if (!/^MLB\d{6,}$/.test(id)) return res.status(400).json({ erro: "Informe ?id=MLB123" });
+
+    const resultado = await consultarItemComFallbacks(id);
+    res.status(resultado.ok ? 200 : 400).json(resultado);
+  } catch (erro) {
+    res.status(500).json({ erro: "Erro no teste do item", detalhe: erro.message });
   }
 });
 
@@ -125,9 +131,7 @@ app.get("/analisar-link", async (req, res) => {
     if (!urlProduto) return res.status(400).json({ erro: "Informe ?url= com o link do Mercado Livre." });
 
     const resultado = await analisarLinkProduto(urlProduto);
-    if (!resultado.ok) return res.status(400).json(resultado);
-
-    res.json(resultado);
+    res.status(resultado.ok ? 200 : 400).json(resultado);
   } catch (erro) {
     res.status(500).json({ erro: "Erro ao analisar link", detalhe: erro.message });
   }
@@ -148,7 +152,7 @@ app.post("/analisar-links", async (req, res) => {
     for (const link of links) {
       const resultado = await analisarLinkProduto(link);
       if (resultado.ok) analisadas.push(resultado.oferta);
-      else erros.push({ link, erro: resultado.erro, detalhe: resultado.detalhe, link_final: resultado.link_final });
+      else erros.push({ link, erro: resultado.erro, detalhe: resultado.detalhe, tentativas: resultado.tentativas, ids: resultado.ids });
     }
 
     analisadas.sort((a, b) => b.nota_oferta - a.nota_oferta);
@@ -172,58 +176,148 @@ app.get("/cacar-ofertas", async (req, res) => {
     const dados = tentarJson(texto);
 
     if (!resposta.ok) {
-      console.error("Falha Mercado Livre:", resposta.status, dados);
       return res.status(resposta.status).json({
         erro: "Busca por palavra-chave bloqueada pelo Mercado Livre neste app. Use /analisar-link ou /analisar-links.",
         status_http: resposta.status,
-        credenciais_configuradas: Boolean(ML_CLIENT_ID && ML_CLIENT_SECRET),
-        conta_ml_conectada: Boolean(userTokenCache.token),
         token_usado: Boolean(token),
         detalhe: dados,
-        alternativa: {
-          analisar_um_link: "/analisar-link?url=LINK_DO_ML",
-          analisar_varios_links: "POST /analisar-links"
-        }
+        alternativa: { analisar_um_link: "/analisar-link?url=LINK_DO_ML", analisar_varios_links: "POST /analisar-links" }
       });
     }
 
-    const ofertas = (dados.results || []).map(normalizarOferta).sort((a, b) => b.nota_oferta - a.nota_oferta);
-    res.json({ termo, total: ofertas.length, token_usado: Boolean(token), conta_ml_conectada: Boolean(userTokenCache.token), ofertas });
+    const ofertas = (dados.results || []).map(normalizarOfertaItem).sort((a, b) => b.nota_oferta - a.nota_oferta);
+    res.json({ termo, total: ofertas.length, token_usado: Boolean(token), ofertas });
   } catch (erro) {
-    console.error("Erro interno:", erro);
     res.status(500).json({ erro: "Erro interno", detalhe: erro.message });
   }
 });
 
 async function analisarLinkProduto(link) {
   const linkFinal = await resolverLinkFinal(link);
-  const id = extrairIdProdutoML(`${link} ${linkFinal}`);
+  const ids = extrairIdsMercadoLivre(`${link} ${linkFinal}`);
 
-  if (!id) {
-    return { ok: false, erro: "Nao consegui identificar o ID do anuncio no link.", link, link_final: linkFinal || "" };
+  if (!ids.itemId && !ids.productId) {
+    return { ok: false, erro: "Nao consegui identificar ID de anuncio ou catalogo no link.", link, link_final: linkFinal || "", ids };
   }
 
-  const token = await obterMelhorToken();
-  const resposta = await fetch(`https://api.mercadolibre.com/items/${id}`, { headers: montarHeaders(token) });
+  const tentativas = [];
+
+  if (ids.itemId) {
+    const item = await consultarItemComFallbacks(ids.itemId);
+    tentativas.push(...item.tentativas);
+    if (item.ok) {
+      const oferta = normalizarOfertaItem(item.dados);
+      oferta.link_original = link;
+      oferta.link_final = linkFinal || link;
+      oferta.origem_dados = item.origem;
+      return { ok: true, id: ids.itemId, ids, oferta, tentativas };
+    }
+  }
+
+  if (ids.productId) {
+    const produto = await consultarProdutoCatalogo(ids.productId);
+    tentativas.push(...produto.tentativas);
+
+    if (produto.ok && produto.item_id) {
+      const item = await consultarItemComFallbacks(produto.item_id);
+      tentativas.push(...item.tentativas);
+      if (item.ok) {
+        const oferta = normalizarOfertaItem(item.dados);
+        oferta.link_original = link;
+        oferta.link_final = linkFinal || link;
+        oferta.origem_dados = `${produto.origem} + ${item.origem}`;
+        return { ok: true, id: produto.item_id, ids, oferta, tentativas };
+      }
+    }
+
+    if (produto.ok) {
+      const oferta = normalizarOfertaCatalogo(produto.dados, linkFinal || link);
+      oferta.link_original = link;
+      oferta.link_final = linkFinal || link;
+      oferta.origem_dados = produto.origem;
+      return { ok: true, id: ids.productId, ids, oferta, tentativas };
+    }
+  }
+
+  return {
+    ok: false,
+    erro: "O Mercado Livre bloqueou a consulta direta desse item/catalogo para este app.",
+    link,
+    link_final: linkFinal || "",
+    ids,
+    tentativas,
+    proximo_caminho: "Enviar titulo, preco, imagem e link para o endpoint manual, ou usar fonte autorizada do afiliado."
+  };
+}
+
+async function consultarItemComFallbacks(id) {
+  const tentativas = [];
+  const tokenUsuario = await obterTokenConta();
+  const tokenApp = await obterTokenApp();
+
+  const headersParaTestar = [
+    { origem: "items_com_token_usuario", headers: montarHeaders(tokenUsuario) },
+    { origem: "items_sem_token", headers: montarHeaders("") },
+    { origem: "items_com_token_app", headers: montarHeaders(tokenApp) }
+  ];
+
+  for (const tentativa of headersParaTestar) {
+    const url = `https://api.mercadolibre.com/items/${id}`;
+    const r = await fetch(url, { headers: tentativa.headers });
+    const texto = await r.text();
+    const dados = tentarJson(texto);
+    tentativas.push({ origem: tentativa.origem, status: r.status, ok: r.ok, resumo: resumirResposta(dados) });
+    if (r.ok) return { ok: true, origem: tentativa.origem, dados, tentativas };
+  }
+
+  return { ok: false, tentativas };
+}
+
+async function consultarProdutoCatalogo(productId) {
+  const tentativas = [];
+  const tokenUsuario = await obterTokenConta();
+  const tokenApp = await obterTokenApp();
+
+  const headersParaTestar = [
+    { origem: "products_com_token_usuario", headers: montarHeaders(tokenUsuario) },
+    { origem: "products_sem_token", headers: montarHeaders("") },
+    { origem: "products_com_token_app", headers: montarHeaders(tokenApp) }
+  ];
+
+  for (const tentativa of headersParaTestar) {
+    const url = `https://api.mercadolibre.com/products/${productId}`;
+    const r = await fetch(url, { headers: tentativa.headers });
+    const texto = await r.text();
+    const dados = tentarJson(texto);
+    tentativas.push({ origem: tentativa.origem, status: r.status, ok: r.ok, resumo: resumirResposta(dados) });
+    if (r.ok) {
+      const itemId = extrairItemDoProdutoCatalogo(dados);
+      return { ok: true, origem: tentativa.origem, dados, item_id: itemId, tentativas };
+    }
+  }
+
+  return { ok: false, tentativas };
+}
+
+function extrairItemDoProdutoCatalogo(dados) {
+  const candidatos = [
+    dados?.buy_box_winner?.item_id,
+    dados?.buy_box_winner?.id,
+    dados?.winner_item_id,
+    dados?.settings?.buy_box_winner?.item_id
+  ].filter(Boolean);
+
+  for (const c of candidatos) {
+    const id = String(c).toUpperCase().replace("-", "");
+    if (/^MLB\d{6,}$/.test(id)) return id;
+  }
+  return "";
+}
+
+async function testarEndpoint(nome, url, headers) {
+  const resposta = await fetch(url, { headers });
   const texto = await resposta.text();
-  const dados = tentarJson(texto);
-
-  if (!resposta.ok) {
-    return {
-      ok: false,
-      erro: "Falha ao consultar item no Mercado Livre",
-      status_http: resposta.status,
-      id,
-      link,
-      link_final: linkFinal || "",
-      detalhe: dados
-    };
-  }
-
-  const oferta = normalizarOferta(dados);
-  oferta.link_original = link;
-  oferta.link_final = linkFinal || link;
-  return { ok: true, id, link_final: linkFinal || link, oferta };
+  return { nome, status: resposta.status, ok: resposta.ok, resumo: resumirResposta(tentarJson(texto)) };
 }
 
 async function resolverLinkFinal(link) {
@@ -234,12 +328,8 @@ async function resolverLinkFinal(link) {
     const resposta = await fetch(entrada, {
       method: "GET",
       redirect: "follow",
-      headers: {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "User-Agent": "Mozilla/5.0 CacaOfertasML/1.0"
-      }
+      headers: { "Accept": "text/html,*/*;q=0.8", "User-Agent": "Mozilla/5.0 CacaOfertasML/1.0" }
     });
-
     return resposta.url || entrada;
   } catch (erro) {
     console.error("Falha ao resolver link final:", erro.message);
@@ -247,24 +337,22 @@ async function resolverLinkFinal(link) {
   }
 }
 
-function extrairIdProdutoML(texto) {
+function extrairIdsMercadoLivre(texto) {
   const entrada = String(texto || "");
   const decodificado = safeDecode(entrada);
   const base = `${entrada} ${decodificado}`;
 
   const wid = base.match(/[?&#]wid=(MLB\d{6,})/i);
-  if (wid) return wid[1].toUpperCase();
+  const itemParam = base.match(/[?&#](?:item_id|itemId|item)=(MLB\d{6,})/i);
+  const anuncioPath = base.match(/(?:produto\.mercadolivre\.com\.br|articulo\.mercadolibre\.com)[^\s]*\/(MLB-?\d{9,})-/i);
+  const itemGenerico = base.match(/MLB-?\d{9,}/i);
+  const productPath = base.match(/\/p\/(MLB\d{6,})/i);
+  const productParam = base.match(/[?&#](?:product_id|productId)=(MLB\d{6,})/i);
 
-  const itemId = base.match(/[?&#](?:item_id|itemId|item)=?(MLB\d{6,})/i);
-  if (itemId) return itemId[1].toUpperCase();
+  const itemId = (wid?.[1] || itemParam?.[1] || anuncioPath?.[1] || itemGenerico?.[0] || "").toUpperCase().replace("-", "");
+  const productId = (productPath?.[1] || productParam?.[1] || "").toUpperCase();
 
-  const anuncioPath = base.match(/(?:produto\.mercadolivre\.com\.br|articulo\.mercadolibre\.com)[^\s]*\/(MLB-?\d{6,})-/i);
-  if (anuncioPath) return anuncioPath[1].toUpperCase().replace("-", "");
-
-  const generico = base.match(/MLB-?\d{9,}/i);
-  if (generico) return generico[0].toUpperCase().replace("-", "");
-
-  return "";
+  return { itemId, productId };
 }
 
 function safeDecode(valor) {
@@ -273,7 +361,6 @@ function safeDecode(valor) {
 
 function normalizarListaLinks(entrada) {
   if (Array.isArray(entrada)) return entrada.map(String).map((x) => x.trim()).filter(Boolean);
-
   return String(entrada || "")
     .split(/\s+/)
     .map((x) => x.trim())
@@ -296,6 +383,9 @@ function resumirResposta(dados) {
     id: dados.id,
     nickname: dados.nickname,
     name: dados.name,
+    title: dados.title,
+    price: dados.price,
+    item_id: dados.item_id,
     results_total: dados.paging?.total,
     results: Array.isArray(dados.results) ? dados.results.slice(0, 2) : undefined
   };
@@ -351,17 +441,10 @@ async function obterTokenApp() {
 
 async function chamadaToken(body) {
   const tokenUrl = "https://api.mercadolibre.com/" + "oauth" + "/" + "token";
-  const resposta = await fetch(tokenUrl, {
-    method: "POST",
-    headers: { "Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-    body
-  });
+  const resposta = await fetch(tokenUrl, { method: "POST", headers: { "Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded" }, body });
   const texto = await resposta.text();
   const detalhe = tentarJson(texto);
-  if (!resposta.ok) {
-    console.error("Falha token ML:", resposta.status, detalhe);
-    return { ok: false, detalhe };
-  }
+  if (!resposta.ok) return { ok: false, detalhe };
   return { ok: true, detalhe };
 }
 
@@ -378,7 +461,7 @@ function tentarJson(texto) {
   try { return JSON.parse(texto); } catch { return { mensagem: texto }; }
 }
 
-function normalizarOferta(item) {
+function normalizarOfertaItem(item) {
   const precoAtual = numero(item.price);
   const precoAntigo = numero(item.original_price);
   const desconto = calcularDesconto(precoAntigo, precoAtual);
@@ -386,7 +469,6 @@ function normalizarOferta(item) {
   const lojaOficial = Boolean(item.official_store_name);
   const imagem = item.thumbnail || item.secure_thumbnail || item.pictures?.[0]?.secure_url || item.pictures?.[0]?.url || "";
   const nota = calcularNota({ precoAtual, precoAntigo, desconto, freteGratis, lojaOficial, condicao: item.condition, status: item.status });
-
   return {
     plataforma: "mercado_livre",
     id_externo: item.id || "",
@@ -408,6 +490,33 @@ function normalizarOferta(item) {
   };
 }
 
+function normalizarOfertaCatalogo(produto, link) {
+  const nome = produto.name || produto.title || "Produto de catalogo Mercado Livre";
+  const winner = produto.buy_box_winner || {};
+  const precoAtual = numero(winner.price || produto.price);
+  const imagem = produto.pictures?.[0]?.url || produto.pictures?.[0]?.secure_url || produto.thumbnail || "";
+  const nota = calcularNota({ precoAtual, precoAntigo: null, desconto: 0, freteGratis: false, lojaOficial: false, condicao: "new", status: "active" });
+  return {
+    plataforma: "mercado_livre",
+    id_externo: produto.id || "",
+    titulo: nome,
+    preco_atual: precoAtual,
+    preco_antigo: null,
+    desconto_percentual: 0,
+    imagem: trocarHttps(imagem),
+    link_produto: link,
+    link_afiliado: "",
+    frete_gratis: false,
+    loja_oficial: "",
+    condicao: "novo",
+    estoque_disponivel: null,
+    vendidos: null,
+    status_ml: "catalogo",
+    nota_oferta: nota,
+    status: nota >= 75 ? "boa_oferta" : nota >= 50 ? "revisar" : "descartar"
+  };
+}
+
 function calcularNota({ precoAtual, precoAntigo, desconto, freteGratis, lojaOficial, condicao, status }) {
   let nota = 0;
   if (desconto >= 50) nota += 35;
@@ -417,7 +526,7 @@ function calcularNota({ precoAtual, precoAntigo, desconto, freteGratis, lojaOfic
   else if (desconto >= 8) nota += 10;
   if (freteGratis) nota += 20;
   if (lojaOficial) nota += 15;
-  if (condicao === "new") nota += 15;
+  if (condicao === "new" || condicao === "novo") nota += 15;
   if (status === "active") nota += 10;
   if (precoAtual && precoAtual <= 50) nota += 15;
   else if (precoAtual && precoAtual <= 150) nota += 12;
